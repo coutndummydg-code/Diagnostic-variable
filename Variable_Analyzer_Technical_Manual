@@ -1,0 +1,701 @@
+# Technical Specification for the Variable Analyzer
+
+**Architecture, statistical foundations, scoring, decision rules, and limitations**
+
+**Version 1.0 | Automatic Variable Diagnosis and Selection System**
+
+> This document specifies the software itself. It is not the diagnostic report produced for an individual dataset.
+
+## 1. Scope
+
+Version 1.0 implements a generic association/prediction-oriented variable diagnostic engine for CSV datasets.
+
+For each target `Y`, predictors are evaluated individually and jointly. The engine produces traceable evidence, normalized sub-scores, warnings, and one of five primary recommendations:
+
+- `USE`
+- `REDUNDANT`
+- `UNSTABLE`
+- `REVIEW`
+- `POSSIBLE NOISE`
+
+The system is designed for feature diagnosis and selection. It does **not** perform causal inference.
+
+## 2. Processing pipeline
+
+The implemented pipeline is:
+
+1. CSV ingestion.
+2. Explicit selection of one or more target variables (`Y`).
+3. Automatic type inference with optional user overrides.
+4. Structured-value expansion for vectors/matrices.
+5. Univariate evidence conditioned on the X/Y data types.
+6. Mutual Information estimation.
+7. Multivariable Extra Trees modelling.
+8. Holdout permutation importance.
+9. X-versus-X redundancy analysis.
+10. Bounded pairwise interaction search.
+11. Synthetic noise baseline estimation.
+12. Repeated-holdout stability estimation.
+13. Evidence normalization and sub-score construction.
+14. Ordered decision rules and vetoes.
+15. CSV and HTML report generation.
+
+Each target is processed independently.
+
+## 3. Internal type taxonomy
+
+### `binary`
+
+Two-level categorical variable, including recognized values such as `True/False`, `0/1`, and `OK/NOK`.
+
+### `categorical`
+
+Nominal categorical variable.
+
+### `ordinal`
+
+Ordered category. Because numeric codes alone cannot reliably establish ordinal semantics, this type is primarily intended to be supplied through a user override.
+
+### `numeric_discrete`
+
+Numeric variable with relatively low cardinality and integer-like values.
+
+For a target, a discrete numeric variable with no more than 12 unique values can be treated as a classification problem.
+
+### `numeric_continuous`
+
+General quantitative continuous variable.
+
+### `percentage`
+
+Quantitative variable recognized through naming/range heuristics. It is analyzed as numeric data.
+
+### `datetime`
+
+Date/time variable converted to Unix-time seconds for scalar analysis.
+
+### `vector` and `matrix`
+
+Structured values stored inside individual CSV cells. Version 1.0 extracts the following scalar summaries:
+
+- mean;
+- standard deviation;
+- minimum;
+- maximum;
+- median;
+- range;
+- number of elements.
+
+Feature-level results are later aggregated back to the source column.
+
+### `identifier`
+
+Likely identifier. Excluded as a standard predictor.
+
+### `constant`
+
+Column containing zero or one distinct non-null value. Excluded.
+
+## 4. Type inference caveat
+
+Type inference is deliberately heuristic.
+
+For example, the series:
+
+```text
+0, 1, 2, 3, 4
+```
+
+could represent:
+
+- an actual measurement;
+- an ordered severity scale;
+- five machine identifiers;
+- five unrelated categories.
+
+Those meanings cannot be recovered reliably from values alone.
+
+The script therefore supports a JSON override file through `--types`.
+
+## 5. Univariate evidence
+
+The purpose of Level 1 is to estimate whether a predictor X contains information about Y when considered independently.
+
+### 5.1 Numeric X and numeric Y
+
+The engine calculates Pearson and Spearman correlations when sufficient valid observations exist.
+
+Pearson correlation is:
+
+```text
+r = Cov(X,Y) / (σX · σY)
+```
+
+The absolute correlation magnitude is interpreted as association strength for this component.
+
+Spearman correlation is Pearson correlation applied to ranks and provides sensitivity to monotonic relationships that are not necessarily linear.
+
+For the v1.0 univariate evidence component, the largest available absolute correlation magnitude is retained.
+
+### 5.2 Categorical X and categorical Y
+
+A contingency table is constructed and Pearson's chi-square test is calculated.
+
+Association magnitude is represented using bias-corrected Cramér's V.
+
+The p-value is retained for diagnostics, but the final decision engine does not classify variables solely on statistical significance.
+
+### 5.3 Numeric X and categorical Y
+
+The system estimates between-group effect using eta squared (`η²`).
+
+The strength passed to the comparable evidence layer is:
+
+```text
+sqrt(η²)
+```
+
+Kruskal-Wallis is also calculated when group structure permits it, and its p-value is retained as auxiliary inferential information.
+
+### 5.4 Categorical X and numeric Y
+
+The correlation ratio / eta-squared concept is used to estimate the proportion of numeric target variability associated with categorical group membership.
+
+Again, the comparable strength is based on:
+
+```text
+sqrt(η²)
+```
+
+## 6. Mutual Information
+
+Mutual Information (MI) provides a more general dependence measure than linear correlation.
+
+For categorical targets, the implementation uses a classification MI estimator.
+
+The raw MI is normalized operationally by target entropy:
+
+```text
+MI_normalized = clip(MI / H(Y), 0, 1)
+```
+
+For numeric targets, a regression MI estimator is used and mapped into a bounded operational scale using:
+
+```text
+MI_normalized = 1 - exp(-MI)
+```
+
+This transformation is monotonic and useful for the evidence engine, but it is **an engineering normalization**, not a universal probabilistic identity.
+
+## 7. Multivariable model
+
+### 7.1 Estimator
+
+Version 1.0 uses:
+
+- `ExtraTreesClassifier` for classification;
+- `ExtraTreesRegressor` for regression.
+
+Current principal parameters are:
+
+```text
+n_estimators = 300
+min_samples_leaf = 2
+random_state = 42
+```
+
+Classification additionally uses balanced class weights.
+
+### 7.2 Preprocessing
+
+Numeric variables are imputed using the median.
+
+Categorical variables are imputed using the most frequent category and are subsequently encoded using an ordinal encoder with an explicit unknown-category value.
+
+This encoding is used as an internal representation for the tree model and should not be interpreted as establishing a true mathematical ordering between nominal categories.
+
+### 7.3 Holdout
+
+Provided the dataset is sufficiently large for the modelling stage, approximately 30% of observations are reserved for testing.
+
+Classification uses stratification when the class counts permit it.
+
+## 8. Permutation importance
+
+After fitting the multivariable model, each predictor is permuted repeatedly in the holdout data.
+
+The implementation currently uses six permutation repeats for the primary importance analysis.
+
+The score is:
+
+- balanced accuracy for classification;
+- `R²` for regression.
+
+If disrupting X decreases predictive quality, X is considered to contain information useful to the multivariable model.
+
+Negative mean importance values are clipped to zero for the diagnostic evidence layer.
+
+When a structured source variable has been expanded into several scalar features, the positive feature importances are aggregated back to the source variable.
+
+Raw positive importances are then normalized relative to the maximum positive variable importance in the analyzed target:
+
+```text
+PermutationScore(X) = positive_importance(X) / max_positive_importance
+```
+
+This produces a target-specific `[0,1]` scale.
+
+## 9. X-versus-X redundancy analysis
+
+The redundancy layer asks whether predictors contain strongly overlapping information.
+
+The selected pairwise association depends on variable type:
+
+- numeric/numeric: absolute Spearman correlation;
+- categorical/categorical: Cramér's V;
+- numeric/categorical: square root of the correlation-ratio effect.
+
+For each source predictor X, the engine retains:
+
+- its highest observed redundancy score;
+- the predictor associated with that score.
+
+A high redundancy score indicates information overlap. It does not establish that two variables are operationally interchangeable.
+
+## 10. Pairwise interaction analysis
+
+A full search over every variable combination can become computationally prohibitive. Version 1.0 therefore bounds the interaction search.
+
+By default, it selects up to eight high-evidence candidates and examines numeric pairs.
+
+For variables X1 and X2, two Extra Trees models are compared:
+
+```text
+Base features:        [X1, X2]
+Interaction features: [X1, X2, X1*X2]
+```
+
+The positive improvement on the holdout metric is retained as the interaction evidence:
+
+```text
+InteractionScore = clip(max(0, Score_with_interaction - Score_base), 0, 1)
+```
+
+This is a pragmatic interaction detector. It is not a complete factorial decomposition and does not exhaustively model arbitrary higher-order interactions.
+
+## 11. Synthetic noise baseline
+
+The system incorporates an empirical chance reference.
+
+For each noise repetition:
+
+1. a real holdout predictor is selected;
+2. its values are randomly permuted;
+3. model performance is recalculated;
+4. the positive performance loss is recorded.
+
+The 95th percentile of the observed disruption losses is retained as `noise_baseline`.
+
+The v1.0 `beats_noise` indicator requires:
+
+```text
+PermutationScore(X) > max(0.05, noise_baseline)
+```
+
+This check provides a practical random-reference threshold. It is not a formal causal or multiple-testing proof.
+
+The default number of noise repetitions is configurable and currently defaults to eight.
+
+## 12. Stability module
+
+Version 1.0 estimates stability through repeated random holdouts.
+
+The default is five additional train/test partitions.
+
+For each partition:
+
+1. a new Extra Trees model is trained;
+2. permutation importance is recalculated using three repeats;
+3. source-feature importances are aggregated;
+4. a variable counts as selected when its positive importance is above the median importance for that run.
+
+The final stability estimate is:
+
+```text
+Stability(X) = number_of_runs_selected / number_of_stability_runs
+```
+
+This measures reproducibility under random partitioning.
+
+It does **not** yet measure explicit temporal, batch, machine, product-family, or grouped stability.
+
+## 13. Normalized scores
+
+### 13.1 Relevance
+
+Version 1.0 uses:
+
+```text
+Relevance =
+    0.30 * UnivariateEvidence
+  + 0.30 * MutualInformation
+  + 0.30 * PermutationScore
+  + 0.10 * InteractionScore
+```
+
+The result is clipped to `[0,1]`.
+
+The weights are a **v1.0 engineering specification** and not universal statistical constants.
+
+### 13.2 Data quality
+
+The implemented quality indicator is:
+
+```text
+Quality =
+  (1 - MissingRate)
+  * min(1, CompleteObservations / 100)
+```
+
+This intentionally penalizes missingness and very small effective sample sizes.
+
+### 13.3 Evidence agreement
+
+Agreement is estimated from the dispersion of three major evidence channels:
+
+```text
+E = [UnivariateEvidence, MutualInformation, PermutationScore]
+
+Agreement = clip(1 - std(E) / 0.5, 0, 1)
+```
+
+### 13.4 Confidence
+
+When multivariable modelling is available:
+
+```text
+Confidence =
+    0.45 * Agreement
+  + 0.30 * Quality
+  + 0.25 * Stability
+```
+
+If multivariable modelling cannot be run, the stability component is represented internally by a neutral value of `0.5` rather than incorrectly treating missing stability evidence as proven instability.
+
+Confidence and relevance intentionally represent different concepts.
+
+Low relevance with high confidence can mean that the system has reasonably consistent evidence that a variable is not useful.
+
+Low relevance with low confidence instead suggests insufficient evidence and should generally favor `REVIEW`.
+
+## 14. Decision engine v1.0
+
+Decision rules are evaluated in priority order.
+
+### Rule 1: Data-quality veto
+
+If:
+
+```text
+Quality < 0.50
+```
+
+then:
+
+```text
+REVIEW
+```
+
+This prevents a strong-looking statistic from overruling clearly weak data coverage.
+
+### Rule 2: Instability
+
+When the multivariable model is available, if:
+
+```text
+Stability < 0.40
+AND PermutationScore >= 0.15
+AND Relevance >= 0.45
+```
+
+then:
+
+```text
+UNSTABLE
+```
+
+### Rule 3: Redundancy
+
+If:
+
+```text
+Redundancy >= 0.90
+AND Relevance >= 0.45
+```
+
+then the variable can be classified:
+
+```text
+REDUNDANT
+```
+
+The corresponding overlapping variable is retained in `redundant_with`.
+
+### Rule 4: Use
+
+A variable can be classified `USE` when:
+
+```text
+Relevance >= 0.55
+```
+
+and sufficient model/noise evidence is available, **or** when the individual and MI channels jointly provide strong independent evidence:
+
+```text
+UnivariateEvidence >= 0.70
+AND MutualInformation >= 0.50
+```
+
+provided a higher-priority rule has not already fired.
+
+### Rule 5: Possible noise
+
+If:
+
+```text
+UnivariateEvidence < 0.20
+AND MutualInformation < 0.20
+AND PermutationScore < 0.15
+AND beats_noise == false
+AND Confidence >= 0.55
+```
+
+then:
+
+```text
+POSSIBLE NOISE
+```
+
+### Rule 6: Safe fallback
+
+All unresolved cases become:
+
+```text
+REVIEW
+```
+
+This is intentional. Ambiguous evidence should not be forced into a stronger label merely because the program is expected to return an answer.
+
+## 15. Secondary flags
+
+The diagnostic layer can preserve additional explanatory flags including:
+
+```text
+calidad_datos_baja
+
+evidencia_inestable
+
+solapamiento_con:<variable>
+
+interaccion_posible:<variable>
+
+redundancia_alta:<variable>
+```
+
+These provide human-readable traceability for the main decision.
+
+## 16. Recorded diagnostic fields
+
+The detailed result table can include, depending on applicability:
+
+- predictor name;
+- target name;
+- detected X type;
+- detected Y type;
+- univariate evidence;
+- Mutual Information;
+- Pearson correlation;
+- Spearman correlation;
+- Cramér's V;
+- eta squared;
+- minimum retained p-value;
+- permutation score;
+- interaction score;
+- interacting variable;
+- redundancy score;
+- redundant variable;
+- stability score;
+- noise baseline;
+- whether the predictor exceeds the noise reference;
+- relevance;
+- confidence;
+- data quality;
+- final decision;
+- diagnostic flags.
+
+## 17. Report outputs
+
+By default, the script creates:
+
+```text
+diagnostico_variables.csv
+diagnostico_variables.html
+```
+
+The CSV is the technically detailed machine-readable result.
+
+The HTML provides a more readable table containing the principal indicators and final diagnosis.
+
+The software does **not** regenerate this manual on every run. The manual documents the application; the generated report documents an analyzed dataset.
+
+## 18. Command-line interface
+
+Basic invocation:
+
+```bash
+python variable_diagnostic.py data.csv -y Status
+```
+
+Custom report names:
+
+```bash
+python variable_diagnostic.py data.csv \
+  -y Status \
+  --output diagnostic.csv \
+  --html diagnostic.html
+```
+
+Multiple targets:
+
+```bash
+python variable_diagnostic.py data.csv \
+  -y Status \
+  -y DefectType \
+  -y Measurement
+```
+
+Type overrides:
+
+```bash
+python variable_diagnostic.py data.csv \
+  -y Status \
+  --types types.json
+```
+
+Robustness/computation controls include:
+
+```text
+--noise-reps
+--stability-reps
+--interaction-top
+```
+
+## 19. Important limitations
+
+### 19.1 Association is not causation
+
+The system identifies association and predictive contribution. It does not demonstrate that changing X will cause Y to change.
+
+### 19.2 Heuristic thresholds
+
+The weights and decision thresholds are explicit v1.0 engineering choices.
+
+They should be calibrated and validated against representative domain datasets before the software is used as a controlled or regulated decision standard.
+
+### 19.3 Ordinal semantics
+
+Ordinal meaning cannot generally be inferred safely from numeric codes alone. User type overrides are recommended when domain semantics are known.
+
+### 19.4 Structured data loss
+
+Summarizing vectors or matrices into basic statistics discards ordering, spatial structure, waveform morphology, and other potentially important information.
+
+### 19.5 Stability is not temporal stability
+
+The current stability measure uses random resampling.
+
+For production systems with meaningful chronology, batches, machines, products, or shifts, a future version should support grouped and time-aware validation.
+
+### 19.6 Correlated predictors and permutation importance
+
+Strongly correlated predictors can share or mask predictive importance. Permutation importance can therefore understate the contribution of a variable when equivalent information remains available through another predictor.
+
+The redundancy analysis partly addresses this situation but does not eliminate the statistical issue.
+
+### 19.7 Information leakage
+
+A variable measured after the target event can produce extremely high predictive performance without being useful for prospective prediction.
+
+Version 1.0 cannot guarantee automatic identification of semantic or chronological leakage.
+
+Domain review remains necessary.
+
+### 19.8 Multiple statistical comparisons
+
+P-values are retained as auxiliary diagnostic evidence. Version 1.0 does not apply a formal multiple-testing correction such as False Discovery Rate adjustment.
+
+The primary decision engine therefore does not classify variables solely by p-value thresholds.
+
+## 20. Recommended validation battery
+
+Before production deployment, the engine should be challenged with controlled datasets where the expected structure is known.
+
+Recommended cases include:
+
+1. Strong linear relationship.
+2. Monotonic but non-linear relationship.
+3. U-shaped relationship with weak Pearson correlation.
+4. Almost exact duplicate predictor for testing `REDUNDANT`.
+5. Purely random predictor for testing `POSSIBLE NOISE`.
+6. Interaction-dominated relationship.
+7. Predictor with severe missingness for testing the quality veto.
+8. Strongly imbalanced binary target.
+9. Multiclass categorical target.
+10. Continuous regression target.
+11. High-cardinality categorical predictor.
+12. Dataset with deliberate target leakage.
+13. Batch/time drift for evaluating a future grouped stability implementation.
+
+The expected labels and score behavior should be defined in advance so that changes to the engine can be regression-tested.
+
+## 21. Recommended future improvements
+
+Possible improvements for a later release include:
+
+- grouped cross-validation;
+- time-series-aware validation;
+- bootstrap confidence intervals;
+- explicit False Discovery Rate control;
+- conditional permutation importance for correlated predictors;
+- SHAP-based interpretability;
+- alternative model families;
+- richer vector/waveform feature extraction;
+- automated leakage warnings;
+- rare-category treatment;
+- externally configurable score weights;
+- externally configurable decision thresholds;
+- calibration profiles for different industrial domains;
+- model-performance quality gates before trusting permutation evidence;
+- explicit uncertainty intervals around relevance and stability.
+
+These extensions can be added without changing the central architecture: **multiple evidence channels feed traceable sub-scores and rules rather than relying on one statistic**.
+
+## 22. Technical design principle
+
+The central principle of the analyzer is:
+
+```text
+Diagnosis(X, Y)
+    = individual association evidence
+    + general dependence evidence
+    + multivariable predictive evidence
+    + redundancy evidence
+    + interaction evidence
+    + random-reference evidence
+    + stability evidence
+    + data-quality controls
+```
+
+The final label is intentionally produced by **scores plus ordered decision rules**, not by a single mathematical statistic.
+
+This makes the result more conservative, more explainable, and easier to evolve as the system is validated against real datasets.
