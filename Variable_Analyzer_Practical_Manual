@@ -1,0 +1,371 @@
+# Practical Manual for the Variable Analyzer
+
+**What it does, why it does it, and how to understand its results without a statistics background**
+
+**Version 1.0 | Automatic Variable Diagnosis and Selection System**
+
+> This manual explains the software itself. It is not the diagnostic report generated for a specific CSV file.
+
+## 1. The idea in one sentence
+
+The program receives a CSV table, examines which columns may help explain or predict one or more target columns, and combines several kinds of evidence before recommending one of five states: **USE**, **REDUNDANT**, **UNSTABLE**, **REVIEW**, or **POSSIBLE NOISE**.
+
+## 2. What problem does it solve?
+
+Imagine a production line containing temperature, pressure, speed, humidity, batch, machine settings, and many sensor readings. At the end, there is an outcome such as `OK/NOK`, a defect class, a quality level, or a numeric measurement.
+
+Looking at only one correlation can be misleading. A variable can:
+
+- have a straight-line relationship with the result;
+- have a curved or non-linear relationship;
+- matter only when combined with another variable;
+- duplicate information already provided by another sensor;
+- appear useful by chance;
+- behave differently in different subsets of the data.
+
+The analyzer therefore looks at the same problem from several viewpoints before making a recommendation.
+
+## 3. What goes in and what comes out?
+
+### Input
+
+- **CSV file:** rows are observations and columns are variables.
+- **Target (`Y`):** the column we want to explain or predict. More than one target can be specified.
+- **Optional type configuration:** a JSON file can correct automatic type detection. This is useful, for example, when numbers `1-5` represent ordered categories rather than measurements.
+
+### Output
+
+For each analyzed CSV, the script generates:
+
+1. a detailed CSV containing calculations and final decisions;
+2. an HTML diagnostic report that is easier to read.
+
+These outputs describe the **specific dataset that was analyzed**. They are different from this permanent software manual.
+
+## 4. What kinds of variables can it recognize?
+
+The system supports or identifies:
+
+- Boolean and binary values such as `True/False`, `0/1`, and `OK/NOK`;
+- categorical values such as machine A/B/C, product family, batch, mode, or color;
+- discrete numeric values;
+- continuous numeric measurements;
+- percentages;
+- dates and times;
+- lists and tuples stored inside cells;
+- matrices stored inside cells;
+- identifiers and constant columns.
+
+Identifiers and constant columns are normally excluded as regular predictors.
+
+### Lists, tuples, and matrices
+
+A list or matrix cannot be treated exactly like a single number. Version 1.0 therefore summarizes structured values using characteristics such as:
+
+- mean;
+- standard deviation;
+- minimum;
+- maximum;
+- median;
+- range;
+- number of elements.
+
+This allows structured data to participate in the general analysis while preserving the connection to its original column.
+
+## 5. The two main levels of analysis
+
+### Level 1: Does X tell us something about Y by itself?
+
+Every candidate variable is first examined individually against the target.
+
+The program selects methods that make sense for the detected types of X and Y. It can examine straight-line relationships, ordering, differences between groups, categorical association, and more general dependence.
+
+### Level 2: Does X still add useful information when the other variables are known?
+
+The program then analyzes the variables together with a tree-based predictive model.
+
+It deliberately disrupts the information in one variable at a time. If model performance becomes worse after that disruption, the variable was contributing useful predictive information to the combined system.
+
+This distinction is important because a variable can look excellent by itself yet add almost nothing once a nearly identical variable is already present.
+
+## 6. The main tools in everyday language
+
+### Pearson correlation
+
+Asks whether X and Y tend to increase or decrease together in an approximately straight-line pattern.
+
+### Spearman correlation
+
+Asks whether increasing X generally corresponds to increasing or decreasing Y while focusing on ordering rather than requiring a straight line.
+
+### Chi-square and Cramér's V
+
+Used with categorical variables. They examine whether categories occur together more systematically than expected by chance and estimate the strength of the association.
+
+### Group-difference evidence
+
+When one variable describes groups and the other is numeric, the analyzer asks whether the groups have meaningfully different numeric values.
+
+### Mutual Information
+
+Asks a broader question:
+
+> How much does knowing X reduce our uncertainty about Y?
+
+This can detect relationships that ordinary linear correlation may miss.
+
+### Permutation Importance
+
+The model is first allowed to learn using all variables. The analyzer then scrambles one variable in the test data.
+
+If prediction becomes much worse, that variable was providing useful information.
+
+### X-versus-X analysis
+
+The analyzer also compares predictors with one another.
+
+This answers questions such as:
+
+> Are temperature sensor A and temperature sensor B mostly telling us the same thing?
+
+This is used to detect redundancy.
+
+### Interaction analysis
+
+Sometimes X1 is weak alone and X2 is weak alone, but their combination is useful.
+
+The interaction analysis searches for evidence that certain numerical variable pairs provide additional information when considered together.
+
+## 7. Relevance, confidence, and data quality
+
+These are deliberately kept separate.
+
+### Relevance
+
+Answers:
+
+> How much useful information does this variable appear to provide about Y?
+
+### Confidence
+
+Answers:
+
+> How consistent is the evidence behind that conclusion?
+
+Several methods agreeing with each other and repeated analyses producing similar outcomes increase confidence.
+
+### Data quality
+
+Answers:
+
+> Do we have enough usable observations to trust the analysis?
+
+Missing values and insufficient complete observations reduce this measure.
+
+A variable may therefore appear important but still receive **REVIEW** if the data available for it are too poor.
+
+## 8. The five final decisions
+
+### USE
+
+There is sufficiently strong evidence that the variable contains useful information for the target.
+
+This is the normal recommendation for variables worth retaining for further analysis or modelling.
+
+### REDUNDANT
+
+The variable appears informative, but much of its information overlaps with another predictor.
+
+**REDUNDANT does not mean useless or defective.**
+
+A redundant sensor might still be valuable as a backup, validation channel, or operational safeguard. It only means that it contributes limited *additional* information in the current analytical context.
+
+### UNSTABLE
+
+The variable's apparent usefulness changes too much between repeated partitions of the data.
+
+This is a reason to investigate. The behavior might depend on batches, machines, shifts, time periods, product types, or other operating conditions.
+
+### REVIEW
+
+The system does not have enough clear evidence for an automatic recommendation.
+
+This may happen when:
+
+- methods disagree;
+- data quality is poor;
+- the evidence is intermediate;
+- the available sample is not sufficient;
+- the variable requires domain knowledge before it can be interpreted safely.
+
+`REVIEW` is intentionally the safe default for uncertain cases.
+
+### POSSIBLE NOISE
+
+Several forms of evidence indicate that the variable contributes little useful information for predicting or explaining the target within this dataset.
+
+The word **possible** matters.
+
+It means:
+
+> The analyzer did not find sufficient useful evidence under the current data and analysis design.
+
+It does **not** mean:
+
+> This variable can never matter under any condition.
+
+## 9. How is the final decision made?
+
+The analyzer does not simply add raw Pearson, chi-square, Mutual Information, and model numbers together because those statistics use different scales.
+
+Instead, it converts the evidence into comparable values between 0 and 1 and creates several internal indicators.
+
+The main relevance score combines:
+
+- individual evidence;
+- Mutual Information;
+- multivariable permutation importance;
+- detected interaction evidence.
+
+The decision engine then applies rules.
+
+Examples:
+
+- poor data quality can force **REVIEW** even when another score looks strong;
+- highly inconsistent model evidence can produce **UNSTABLE**;
+- strong overlap with another informative variable can produce **REDUNDANT**;
+- consistently weak evidence can produce **POSSIBLE NOISE**;
+- sufficiently strong and coherent evidence can produce **USE**.
+
+The score helps rank variables, but **the score alone does not make the decision**.
+
+## 10. Why compare against artificial noise?
+
+A statistical or predictive method can sometimes find apparent patterns purely by chance.
+
+The analyzer therefore creates a practical reference based on deliberately scrambled information.
+
+The question becomes:
+
+> Does this real variable provide more useful information than the kind of apparent importance we can create by disrupting information at random?
+
+This does not magically prove that a variable is real or causal. It provides an additional protection against treating weak accidental patterns as important.
+
+## 11. Stability analysis
+
+The model analysis is repeated using several different training/test divisions.
+
+If a variable is useful in nearly every division, its evidence is more stable.
+
+If it is important in one split and disappears in another, its stability is lower.
+
+This is particularly useful in quality-control applications, where relationships can change because of:
+
+- production batches;
+- machines;
+- operators or shifts;
+- maintenance;
+- recipes;
+- product families;
+- environmental conditions;
+- process drift.
+
+Version 1.0 measures stability across random data partitions. It does not yet perform a dedicated time-based or batch-based stability study.
+
+## 12. What the analyzer does **not** prove
+
+### It does not prove causality
+
+If X helps predict Y, this does not automatically mean X causes Y.
+
+A third variable may influence both, or X may merely be a symptom of another underlying process.
+
+For causal questions, process knowledge and, where practical, controlled experiments or Design of Experiments are still needed.
+
+### It does not automatically understand process chronology
+
+A column measured after the final outcome can predict that outcome extremely well while being useless for early prediction.
+
+The program cannot always discover this from numbers alone.
+
+### It does not know the physical meaning of a sensor
+
+Human process knowledge remains important when deciding whether a statistical relationship is physically credible and operationally useful.
+
+## 13. Basic usage
+
+A basic analysis with one target:
+
+```bash
+python variable_diagnostic.py process.csv -y Status
+```
+
+Custom output names:
+
+```bash
+python variable_diagnostic.py process.csv \
+  -y Status \
+  --output diagnostic.csv \
+  --html diagnostic.html
+```
+
+Several target variables can be analyzed in one run by repeating `-y`:
+
+```bash
+python variable_diagnostic.py process.csv \
+  -y Status \
+  -y DefectType \
+  -y QualityScore
+```
+
+If automatic type detection needs help:
+
+```bash
+python variable_diagnostic.py process.csv \
+  -y Status \
+  --types types.json
+```
+
+For example, `types.json` could declare that a numeric-looking column is ordinal:
+
+```json
+{
+  "Severity": "ordinal"
+}
+```
+
+## 14. How to read the generated report
+
+A practical reading order is:
+
+1. Look at **decision**.
+2. Check **relevance**.
+3. Check **confidence**.
+4. Check **quality**.
+5. For `REDUNDANT`, inspect **redundant_with**.
+6. For interactions, inspect **interaction_with**.
+7. Compare **beats_noise**.
+8. Review **stability**.
+9. Read **flags** to understand which warnings or rules influenced the recommendation.
+
+## 15. Recommended interpretation
+
+Treat the system as a **structured diagnostic assistant** rather than an automatic judge.
+
+Its job is to reduce a large table of variables into a more manageable set of questions:
+
+- Which variables clearly deserve attention?
+- Which ones repeat information already available elsewhere?
+- Which relationships are unstable?
+- Which variables require human review?
+- Which variables currently behave like possible noise?
+
+The final decision about a production process should combine this evidence with engineering knowledge, measurement-system knowledge, and the real operating context.
+
+## 16. Design philosophy
+
+The analyzer is intentionally designed **not to fall in love with one statistic**.
+
+No single Pearson correlation, p-value, model importance, or Mutual Information result is treated as the entire truth.
+
+The system seeks agreement, preserves disagreements, records warnings, and chooses **REVIEW** when the available evidence is not strong enough for a more confident recommendation.
